@@ -144,6 +144,8 @@ router.get("/", (context: Context) => {
       <head>
         <meta charset="UTF-8">
         <title>Profile Counter</title>
+        <meta property="og:image" content="https://i.imgur.com/r98XIfF.png">
+        <link rel="icon" type="image/png" href="https://i.imgur.com/gQIcqg8.png">
         <style>
           body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace;
