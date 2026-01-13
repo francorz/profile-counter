@@ -7,8 +7,7 @@ const router = new Router();
 const UPSTASH_REDIS_REST_URL = Deno.env.get("UPSTASH_REDIS_REST_URL");
 const UPSTASH_REDIS_REST_TOKEN = Deno.env.get("UPSTASH_REDIS_REST_TOKEN");
 const DISCORD_WEBHOOK_URL = Deno.env.get("DISCORD_WEBHOOK_URL");
-const NOTIFY_KEYS = Deno.env.get("NOTIFY_KEYS");
-
+const NOTIFY_KEYS = Deno.env.get("NOTIFY_KEYS") || "";
 
 const PORT = Deno.env.get("PORT") || "3000";
 
@@ -19,7 +18,8 @@ const redis = new Redis({
 })
 const PLACES = 7;
 
-function checkKeyInProfileKeys(profileKeys, givenKey) {
+function checkKeyInProfileKeys(profileKeys: string | undefined, givenKey: string): boolean {
+  if (!profileKeys) return false;
   const isKeyIncluded = profileKeys.split(',').map(key => key.trim()).includes(givenKey);
   return isKeyIncluded;
 }
