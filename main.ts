@@ -1,36 +1,43 @@
-import { Application, Router, Context, send } from "https://deno.land/x/oak/mod.ts";
-import { Redis } from "https://esm.sh/@upstash/redis@1.28.0";
+import { Application, Router, Context } from "https://deno.land/x/oak/mod.ts";
 
 const app = new Application();
 const router = new Router();
 
-const UPSTASH_REDIS_REST_URL = Deno.env.get("UPSTASH_REDIS_REST_URL");
-const UPSTASH_REDIS_REST_TOKEN = Deno.env.get("UPSTASH_REDIS_REST_TOKEN");
+const kv = await Deno.openKv();
+
 const DISCORD_WEBHOOK_URL = Deno.env.get("DISCORD_WEBHOOK_URL");
 const NOTIFY_KEYS = Deno.env.get("NOTIFY_KEYS") || "";
-
 const PORT = Deno.env.get("PORT") || "3000";
 
-console.log(UPSTASH_REDIS_REST_URL)
-const redis = new Redis({
-  url: UPSTASH_REDIS_REST_URL,
-  token: UPSTASH_REDIS_REST_TOKEN,
-})
-const PLACES = 7;
+console.log("[INFO] Deno KV connected");
 
-function checkKeyInProfileKeys(profileKeys: string | undefined, givenKey: string): boolean {
+const PLACES = 7;
+const DEFAULT_BACKGROUND = "#000000";
+const DEFAULT_TEXT = "#00FF13";
+
+function checkKeyInProfileKeys(profileKeys: string, givenKey: string): boolean {
   if (!profileKeys) return false;
-  const isKeyIncluded = profileKeys.split(',').map(key => key.trim()).includes(givenKey);
-  return isKeyIncluded;
+  return profileKeys.split(',').map(key => key.trim()).includes(givenKey);
 }
 
-export function makeSvg(count: number) {
+function isValidHexColor(color: string): boolean {
+  return /^#([0-9A-Fa-f]{3}){1,2}$/.test(color);
+}
+
+function normalizeColor(color: string): string {
+  if (color.length === 4) {
+    return '#' + color[1] + color[1] + color[2] + color[2] + color[3] + color[3];
+  }
+  return color;
+}
+
+export function makeSvg(count: number, backgroundColor: string, textColor: string) {
   const countArray = count.toString().padStart(PLACES, "0").split("");
   const parts = countArray.reduce(
     (acc, next, index) =>
       `${acc}
-       <rect id="Rectangle" fill="#000000" x="${index * 32}" width="29" height="29"></rect>
-       <text id="0" font-family="Courier" font-size="24" font-weight="normal" fill="#00FF13">
+       <rect fill="${backgroundColor}" x="${index * 32}" width="29" height="29"></rect>
+       <text font-family="Courier" font-size="24" font-weight="normal" fill="${textColor}">
            <tspan x="${index * 32 + 7}" y="22">${next}</tspan>
        </text>
 `,
@@ -39,7 +46,7 @@ export function makeSvg(count: number) {
   return `<?xml version="1.0" encoding="UTF-8"?>
   <svg width="${PLACES * 32}px" height="30px" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
       <title>Count</title>
-      <g id="Page-1" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
+      <g stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
         ${parts}
       </g>
   </svg>
@@ -49,35 +56,57 @@ export function makeSvg(count: number) {
 router.get("/:key/count.svg", async (context: Context) => {
   try {
     const { key } = context.params;
-    let count = await redis.get(key);
-
-    if (!count) {
-      count = "1";
-      await redis.set(key, count);
-    } else {
-      count = String(parseInt(count) + 1);
-      await redis.set(key, count);
+    
+    const url = new URL(context.request.url);
+    let backgroundColor = url.searchParams.get("background") || DEFAULT_BACKGROUND;
+    let textColor = url.searchParams.get("text") || DEFAULT_TEXT;
+    
+    if (!backgroundColor.startsWith('#')) {
+      backgroundColor = '#' + backgroundColor;
     }
-
-    // Send message to Discord via webhook only if key is included in NOTIFY_KEYS
-    if (checkKeyInProfileKeys(NOTIFY_KEYS,key)){
-    await fetch(DISCORD_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        content: `Hit count for ${key}: ${count} at <t:${Math.round(new Date().getTime()/1000)}:f>`,
-      }),
-    });
+    if (!textColor.startsWith('#')) {
+      textColor = '#' + textColor;
     }
-    // Create SVG
-    const svg = makeSvg(parseInt(count));
-
+    
+    if (!isValidHexColor(backgroundColor)) {
+      console.warn(`[WARN] Invalid background color: ${backgroundColor}, using default`);
+      backgroundColor = DEFAULT_BACKGROUND;
+    }
+    if (!isValidHexColor(textColor)) {
+      console.warn(`[WARN] Invalid text color: ${textColor}, using default`);
+      textColor = DEFAULT_TEXT;
+    }
+    
+    backgroundColor = normalizeColor(backgroundColor);
+    textColor = normalizeColor(textColor);
+    
+    const result = await kv.get<number>(["counter", key]);
+    let count = result.value || 0;
+    count++;
+    await kv.set(["counter", key], count);
+    
+    console.log(`[LOG] ${key}: ${count} (bg: ${backgroundColor}, text: ${textColor})`);
+    
+    if (DISCORD_WEBHOOK_URL && checkKeyInProfileKeys(NOTIFY_KEYS, key)) {
+      try {
+        await fetch(DISCORD_WEBHOOK_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            content: `Hit count for ${key}: ${count} at <t:${Math.round(new Date().getTime()/1000)}:f>`,
+          }),
+        });
+      } catch (err) {
+        console.error("[DISCORD] webhook error:", err);
+      }
+    }
+    
+    const svg = makeSvg(count, backgroundColor, textColor);
     context.response.headers.set("Content-Type", "image/svg+xml");
-    context.response.headers.set("Cache-Control","max-age=0, no-cache, no-store, must-revalidate")
-
+    context.response.headers.set("Cache-Control", "max-age=0, no-cache, no-store, must-revalidate");
     context.response.body = svg;
   } catch (error) {
-    console.error("Error occurred:", error);
+    console.error("[ERROR]", error);
     context.response.status = 500;
     context.response.body = "Internal Server Error";
   }
@@ -86,35 +115,156 @@ router.get("/:key/count.svg", async (context: Context) => {
 router.get("/:key/", async (context: Context) => {
   try {
     const { key } = context.params;
-    let count = await redis.get(key);
-
-    if (!count) {
-      count = "0";
-    }
-
-    const response = {
-      key,
-      count,
-    };
-
+    const result = await kv.get<number>(["counter", key]);
+    const count = result.value || 0;
+    
     context.response.headers.set("Content-Type", "application/json");
-    context.response.body = JSON.stringify(response);
+    context.response.body = JSON.stringify({ key, count });
   } catch (error) {
-    console.error("Error occurred:", error);
+    console.error("[ERROR]", error);
     context.response.status = 500;
     context.response.body = "Internal Server Error";
   }
 });
 
+router.get("/health", (context: Context) => {
+  context.response.body = { 
+    status: "ok", 
+    database: "Deno KV",
+    timestamp: new Date().toISOString(),
+    if_you_read_this: "VI VON ZULUL"
+  };
+});
+
+router.get("/", (context: Context) => {
+  context.response.headers.set("Content-Type", "text/html; charset=utf-8");
+  context.response.body = `
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta charset="UTF-8">
+        <title>Profile Counter</title>
+        <style>
+          body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace;
+            padding: 40px;
+            background: #0d1117;
+            color: #c9d1d9;
+            line-height: 1.6;
+          }
+          h1 { color: #58a6ff; }
+          h2 { color: #79c0ff; margin-top: 30px; }
+          code {
+            background: #161b22;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #79c0ff;
+            font-size: 14px;
+          }
+          pre {
+            background: #161b22;
+            padding: 16px;
+            border-radius: 6px;
+            overflow-x: auto;
+            border: 1px solid #30363d;
+          }
+          .example {
+            background: #161b22;
+            padding: 20px;
+            border-radius: 6px;
+            margin: 20px 0;
+            border: 1px solid #30363d;
+          }
+          .counter-demo {
+            margin: 10px 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+          }
+          a { color: #58a6ff; text-decoration: none; }
+          a:hover { text-decoration: underline; }
+          ul { margin: 10px 0; }
+          li { margin: 8px 0; }
+        </style>
+      </head>
+      <body>
+        <h1>🗒️ Profile Counter API</h1>
+
+        <h2>Usage</h2>
+        <p>Basic usage:</p>
+        <pre><code>https://profile-counter.francorz.deno.net/:key/count.svg</code></pre>
+
+        <p>With custom colors:</p>
+        <pre><code>https://profile-counter.francorz.deno.net/:key/count.svg?background=222223&text=feee68</code></pre>
+
+        <h2>Query Parameters</h2>
+        <ul>
+          <li><code>background</code> - Background color (hex code)</li>
+          <li><code>text</code> - Text color (hex code)</li>
+        </ul>
+        <p><small>The # symbol is optional in hex codes</small></p>
+
+        <h2>Examples</h2>
+        
+        <div class="example">
+          <h3>Default (Black & Green)</h3>
+          <div class="counter-demo">
+            <img src="/demo1-nobody-should-guess-this/count.svg" alt="Default counter"/>
+            <code>/YOUR_KEY/count.svg</code>
+          </div>
+        </div>
+
+        <div class="example">
+          <h3>Dark Gray & Yellow</h3>
+          <div class="counter-demo">
+            <img src="/demo2-nobody-should-guess-this/count.svg?background=222223&text=feee68" alt="Custom counter"/>
+            <code>/YOUR_KEY/count.svg?background=222223&text=feee68</code>
+          </div>
+        </div>
+
+        <div class="example">
+          <h3>Blue & White</h3>
+          <div class="counter-demo">
+            <img src="/demo3-nobody-should-guess-this/count.svg?background=1a1f3a&text=ffffff" alt="Blue counter"/>
+            <code>/YOUR_KEY/count.svg?background=1a1f3a&text=ffffff</code>
+          </div>
+        </div>
+
+        <div class="example">
+          <h3>Purple & Cyan</h3>
+          <div class="counter-demo">
+            <img src="/demo4-nobody-should-guess-this/count.svg?background=2d1b69&text=00ffff" alt="Purple counter"/>
+            <code>/YOUR_KEY/count.svg?background=2d1b69&text=00ffff</code>
+          </div>
+        </div>
+
+        <div class="example">
+          <h3>Red & Gold</h3>
+          <div class="counter-demo">
+            <img src="/demo5-nobody-should-guess-this/count.svg?background=4a0000&text=ffd700" alt="Red counter"/>
+            <code>/YOUR_KEY/count.svg?background=4a0000&text=ffd700</code>
+          </div>
+        </div>
+
+        <h2>Other Endpoints</h2>
+        <ul>
+          <li><a href="/health">GET /health</a> - Health check</li>
+          <li><code>GET /:key/</code> - Get count as JSON</li>
+        </ul>
+
+        <h2>How to Use in Your README</h2>
+        <pre><code>&lt;img src="https://profile-counter.francorz.deno.net/YOUR_KEY/count.svg" alt="Visitor Count" /&gt;</code></pre>
+
+        <p style="margin-top: 40px; color: #8b949e; font-size: 14px;">
+          Made with 💚 using Deno Deploy
+        </p>
+      </body>
+    </html>
+  `;
+});
 
 app.use(router.routes());
 app.use(router.allowedMethods());
 
-// app.use(async (context: Context) => {
-//   await send(context, context.request.url.pathname, {
-//     root: `${Deno.cwd()}/public`,
-//   });
-// });
-
-console.log(`Server is running on port ${PORT}`);
+console.log(`[INFO] Server is running on port ${PORT}`);
 await app.listen({ port: parseInt(PORT) });
