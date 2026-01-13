@@ -1,5 +1,5 @@
 import { Application, Router, Context, send } from "https://deno.land/x/oak/mod.ts";
-import { Redis } from "https://deno.land/x/upstash_redis/mod.ts";
+import { Redis } from "https://esm.sh/@upstash/redis@1.28.0";
 
 const app = new Application();
 const router = new Router();
